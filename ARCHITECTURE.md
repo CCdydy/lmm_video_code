@@ -129,20 +129,56 @@ encoder_sep、bottlenecks）V1 / V2 完全共用，**保证 V1 路径 bit-exact*
 
 ## 7. 已知问题 / Known issues
 
-### Patcher 600 MB identity-kernel 分配（上游 VCT 遗留）
+### Patcher 600 MB identity-kernel 分配（上游 VCT 遗留）✅ 已修复 (commit aa47ca1)
 
 `neural/patcher.py:_window_partition_conv2d` 在 `patch_size ≠ stride`（encoder 路径）
-时构造 `torch.diag(ones(C × patch_size²))` = (12288 × 12288) identity kernel ≈
-**600 MB**，conv2d 期间不释放。
+时原本构造 `torch.diag(ones(C × patch_size²))` = (12288 × 12288) identity kernel ≈
+**600 MB**，conv2d 期间不释放。已替换为两次 `Tensor.unfold`（纯 view, 零分配）。
 
-**实测影响**（RTX 5090 24 GB, V1 ctx=2, Vimeo 7-frame sample）：
-- B=1 ✅ 通过
-- B=2 ❌ OOM（每 P-scene 600 MB × 6 P-scenes × 2 batch = 7.2 GB 仅 kernel）
+数值等价性由 [`tests/neural/test_patcher_unfold_equivalence.py`](projects/torch_vct/tests/neural/test_patcher_unfold_equivalence.py)
+守护：CPU 上 forward bit-exact，CUDA 上 TF32 关闭后 forward bit-exact，backward
+gradient 差 < 1 fp32 ulp。
 
-这让之前文档里 "Phase 0 B=24" 的估算高估了约一个数量级。真实 batch 上限要等
-6000 Ada 上重新 profile 出来。**正确修法**是把 conv2d-based partitioning 换成
-`Tensor.unfold` 纯 view 操作（零内存），但需要先验证与 V1 数值等价 ——
-**放进 Phase 1 之后的优化 backlog，不在 Phase 0 critical path**。
+## 8. dev box batch capacity（实测，post aa47ca1）
+
+复现脚本：[`scripts/benchmark_batch_capacity.py`](projects/torch_vct/scripts/benchmark_batch_capacity.py)，
+在 dev box 和 training box 上跑出来对比即可。
+
+dev box (RTX 5090 Laptop, 24 GB, bf16 AMP, Vimeo 7-frame septuplet):
+
+| config | B | alloc_GB | sec/step | samples/sec |
+|---|---|---|---|---|
+| V1 ctx=2 | 1 | 10.17 | 0.340 | 2.95 |
+| V1 ctx=2 | **2** | **18.01** | **0.573** | **3.49** ← 实际上限 |
+| V1 ctx=2 | 4 | OOM | — | — |
+| V2 ctx=2 | 1 | 10.53 | 0.335 | 2.99 |
+| V2 ctx=2 | 2 | 18.70 | 0.593 | 3.37 |
+| V2 ctx=2 | 4 | OOM | — | — |
+
+V2 只比 V1 多 ~0.7 GB（RoPE buffer + SwiGLU FFN 的开销很小）。**dev box 单 micro-step 0.57s
+@ B=2**，effective batch=8 via grad_accum=4 → 2.3s / effective step → 1M effective steps ≈ 26 天。
+
+training box (RTX 6000 Ada, 48 GB) 上的容量预计远高（至少 B=6–8），等那台空了跑一遍 benchmark 就有数。
+
+## 9. 待决策：Phase 0 V1 复现的范围
+
+dev box 上跑完整 1M-step V1 复现需要 26 天 —— 不合理。三个候选方案：
+
+| 选项 | 内容 | 时长 (dev box) | 优势 | 风险 |
+|---|---|---|---|---|
+| **A** | **跳过 Phase 0 完整复现**，直接 Phase 1 (V2 ctx=2)，V1 baseline 用 paper 公布的 BD-rate 数字 | 0 (省略) | 最高效；马上能拿 V2 数据 | 论文需说明对比方法 |
+| **B** | Phase 0 短训练 (~200K 步, ~1.3 天)，拿 V1 早期收敛曲线作内部对比 | ~1.3 天 | 内部一致；不依赖外部数字 | 不是 paper 终值，只能做相对比较 |
+| **C** | Phase 0 完整复现 1M 步 | ~26 天 | 最严谨 | dev box 串行 26 天，6000 Ada 空了也只能干等 |
+
+agent 推荐 **选项 A**，理由：
+
+1. VCT paper V1 的 BD-rate 在 UVG / MCL-JCV 上已是公开 baseline。审稿人不会
+   要求自己复现，写明"V1 数字取自 [VCT, NeurIPS'22]"即可。
+2. dev box 26 天浪费在复现一个已有结果，机会成本是 4–5 个 V2 sub-experiment。
+3. 选项 B 的"短训练曲线对比"本质是 noise—— V1 / V2 短训练阶段都没收敛，曲线
+   形状的差异可能更多反映初始化随机性而非架构差异。
+
+**决策悬而未定**。这台机器在等 user 拍板。
 
 ---
 

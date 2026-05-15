@@ -30,9 +30,15 @@ Main contribution metric：**GOP utilization 6% (2/32) → 100% (32/32)**。
 | ~~4~~ | ~~`context_len=64`~~ | ❌ out of scope |
 | ~~5~~ | ~~`context_len=128`~~ | ❌ out of scope |
 
-**Batch size 数字目前不写**：之前估的 "Phase 0 B=24 / Phase 3b B=2" 假设过乐观，没考虑
-上游 patcher 600 MB identity-kernel 问题（见 [ARCHITECTURE.md §7 已知问题](ARCHITECTURE.md)）。
-实测：V1 ctx=2 @ 24 GB **B=2 就 OOM**。真实 batch 上限要等 6000 Ada 上重测。
+**dev box 实测 batch 上限**（post commit aa47ca1，bf16 AMP）：
+
+- V1 ctx=2：B=2 / 18.0 GB peak / 0.57 sec/step
+- V2 ctx=2：B=2 / 18.7 GB peak / 0.59 sec/step
+- B=4 OOM；ELIC per-frame 激活是主要 footprint
+
+完整数据 + 复现脚本见 [ARCHITECTURE.md §8](ARCHITECTURE.md)，跑一遍 6000 Ada 即可对比。
+**Phase 0 V1 完整复现耗时 ~26 天 @ dev box，已挂起，等 user 决策选项 A/B/C
+（见 [ARCHITECTURE.md §9](ARCHITECTURE.md)）**。
 
 **训练规模预估**：单卡 RTX 5090 Laptop (~110 TFLOPS bf16)，从 Phase 0 走到 Phase 3b
 约需 **2–3 周纯训练时间**。所需数据集磁盘约 **310 GB**（Vimeo 全集 + Kinetics-400
