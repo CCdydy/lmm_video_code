@@ -1,11 +1,14 @@
-# VCT V2: Long-Context Spatiotemporal Entropy Model
+# VCT V2: Fill the GOP
 
 把 VCT (Mentzer et al., NeurIPS 2022) 的 joint spatiotemporal self-attention
-从 **2 帧** 扩展到 **128 帧**，用 LLM 长上下文工具箱（FlashAttention-2 / RoPE / RMSNorm / SwiGLU / Mamba）
+从 **2 帧** 扩展到 **整个 GOP（32 帧）**，用 FlashAttention-2 + RoPE + RMSNorm + SwiGLU
 让"多帧联合自注意力"这个早期被算力限制锁死的设计可以真正放大。
 
-详细设计与各 phase 实验计划见 [`VCT_V2_Design_Log.md`](VCT_V2_Design_Log.md)。
-数据集路径与可用性见 [`DATASETS.md`](DATASETS.md)。
+Main contribution metric：**GOP utilization 6% (2/32) → 100% (32/32)**。
+
+- 架构一页 reference 见 [`ARCHITECTURE.md`](ARCHITECTURE.md)
+- 详细设计 / novelty / related work 见 [`VCT_V2_Design_Log.md`](VCT_V2_Design_Log.md)
+- 数据集路径与可用性见 [`DATASETS.md`](DATASETS.md)
 
 ---
 
@@ -66,17 +69,29 @@ NeuralCompression/
 
 ## Environment
 
-环境已建好，**不要再次 `mamba create`**。所有命令一律用绝对路径，**不要依赖 `conda activate`**。
+**双机分工**（详见 [ARCHITECTURE.md §4](ARCHITECTURE.md)）：
 
-- 路径：`/home/zzy/miniforge3/envs/torch_vct/`
+| | dev box (本机) | training box |
+|---|---|---|
+| GPU | RTX 5090 Laptop, sm_120, 24 GB | RTX 6000 Ada, sm_89, 48 GB |
+| 用途 | sanity / wiring / debug | 全部真实训练长跑 |
+| env 状态 | ✅ 已建好 | ⏳ 待 git pull 后按下方步骤重建 |
+
+### dev box: `/home/zzy/miniforge3/envs/torch_vct/`
+
 - 关键版本：Python 3.10 / **torch 2.7.1+cu128** / **pytorch-lightning 2.5.6** /
   **torchmetrics 1.9.0** / hydra-core 1.3.2 / numpy 1.26.4 / scipy 1.11.1 /
   setuptools 80.10.2 / compressai 1.2.8 / pytorchvideo 0.1.5
-- GPU：**RTX 5090 Laptop (sm_120, Blackwell)**，driver 595.58.03。torch 2.7.1
-  的 cu128 wheel 含原生 sm_120 binary，**不再需要 PTX-JIT**（架构列表里 `sm_120`
+- torch 2.7.1 的 cu128 wheel 含原生 sm_120 binary，**不再需要 PTX-JIT**（架构列表里 `sm_120`
   + `compute_120` 都在）。
-- 旧 docs 里钉的 torch 2.1.2 / lightning 2.1.4 不适用本机：RTX 5090 是 Blackwell，
-  torch ≤ 2.6 没有 sm_120 binary 也无法 JIT。
+- 旧 docs 里钉的 torch 2.1.2 / lightning 2.1.4 不适用 sm_120：torch ≤ 2.6 没有 sm_120 binary 也无法 JIT。
+
+### training box: 同样照下方步骤建 env
+
+sm_89 (Ada) 是 mature 架构，cu128 wheel 完全兼容；上面的版本组合直接复用。**额外**
+可以再装 `flash_attn` PyPI 包（sm_89 有预编译 wheel），dev box 上 sm_120 的 wheel
+还不稳定所以这台不装。`flash_attn` 包只对 Phase 3c 的 ALiBi in-kernel bias 有用，
+Phase 0–3b 主路径用 PyTorch SDPA flash backend 就够。
 
 **重建 env 的步骤**（顺序敏感）：
 

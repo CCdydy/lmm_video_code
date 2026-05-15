@@ -27,11 +27,19 @@ Frame t-1 latent ──┤
 
 The **encoder_joint** is the critical module: it performs spatiotemporal attention where every token can attend to every other token across all frames. This is architecturally correct and reminiscent of how LLMs handle long sequences.
 
-### 1.2 The Bottleneck
+### 1.2 The Bottleneck: GOP utilization is 6%
 
 VCT's `encoder_joint` processes only `context_len = 2` frames (128 tokens). This is not a fundamental design limitation—it's a practical one: `context_len` was chosen at a time when training transformer models on longer sequences was computationally prohibitive.
 
-The hypothesis of V2: **lifting this context window from 2 frames to N frames (up to 128) using modern LLM building blocks will yield significant RD-performance gains** without changing the architectural philosophy.
+Concretely: **LVC benchmarks (UVG, MCL-JCV, HEVC Class B/C) all use GOP=32**. VCT
+attends to 2 of those 32 frames, which is **6% GOP utilization**. The remaining
+29 frames of historical context the model could in principle see are simply
+not given to the joint encoder.
+
+The hypothesis of V2: **fill the GOP**. Lift `context_len` from 2 to 32 (the
+industry-standard GOP length) using modern LLM building blocks. No architectural
+redesign — same VCT shape, same spatiotemporal joint attention idea, just at
+the sequence length the benchmark already implies.
 
 ### 1.3 Why Now
 
@@ -252,7 +260,66 @@ Removed ablations (out of scope): `mid_window_frames` sweep, Global branch Flash
 
 ---
 
-## 6. Key References
+## 6. Novelty Claims
+
+What V2 contributes beyond VCT, stated in three precise claims:
+
+### 6.1 Observational novelty: "GOP utilization" as a framing
+
+Prior LVC work discusses RD performance, encoder design, entropy model
+sophistication. **No one has framed "we only use 2 of the 32 frames the
+benchmark assumes" as an explicit problem statement.** This re-framing of a
+well-known fact (everyone uses ctx=2) into an explicit bottleneck
+(*utilization = 6%*) is a viewpoint contribution. Worth 1–2 paragraphs in the
+introduction.
+
+### 6.2 Engineering + empirical novelty: making GOP-fill work
+
+Conceptually "scale to 32 frames" is trivial. Making it train without OOMing,
+diverging, or losing the gains positional encoding gave VCT requires a
+specific stack:
+
+- **FlashAttention-2** — without it, ctx=32 (seq=2048) blows up memory.
+- **RoPE** — learned positions don't extrapolate; RoPE does and stays stable.
+- **RMSNorm + SwiGLU** — long-sequence training stability over GELU+LayerNorm.
+
+The main contribution is the **empirical demonstration that this specific
+combination works** in the LVC entropy-model setting. This is what the bulk of
+the paper defends.
+
+### 6.3 Empirical novelty: the context-length saturation curve
+
+The 5-step incremental experimental design (Phase 0 → 3b: ctx ∈ {2, 4, 8, 16, 32})
+produces a **BD-rate vs context-length curve** that no prior LVC work has reported.
+This curve tells the field:
+
+- How marginal gains accumulate from ctx=2 to ctx=32
+- Where saturation begins (if it does)
+- How the slope differs by content type (UVG categories: low/high motion, scene cut)
+
+The curve itself is a research artifact: a reference baseline for the next
+generation of long-context LVC work.
+
+---
+
+## 7. Differentiation from Related Work
+
+| Related work | Their angle | Our angle |
+|---|---|---|
+| **VCT** (NeurIPS '22) | Introduce transformer-based LVC | Extend its joint-encoder context |
+| **FLAVC** (CVPR '25) | Replace MEMC with attention | Same path, but push attention length |
+| **DCVC-RT** (CVPR '25) | Implicit temporal modeling for speed | They trade context for speed; we trade speed for context |
+| **L-STEC** (Dec '25) | LSTM-based long-term modeling | They use LSTM; we use modern transformer |
+| **LTCG** (ECCV '24) | Feature clustering for long-term retrieval | They search clusters; we use dense attention |
+
+The differentiator is consistent: **dense spatiotemporal attention over the full
+GOP**, achieved via modern primitives. Each related work either trades context
+away (DCVC-RT), uses a different mechanism (LSTM, clustering), or operates at a
+shorter context (VCT, FLAVC). None fill the GOP with attention.
+
+---
+
+## 8. Key References
 
 - **VCT**: Mentzer et al., "VCT: A Video Compression Transformer", NeurIPS 2022
 - **FlashAttention-2**: Dao, "FlashAttention-2: Faster Attention with Better Parallelism", 2023
