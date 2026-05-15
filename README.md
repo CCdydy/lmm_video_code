@@ -19,16 +19,20 @@ Main contribution metric：**GOP utilization 6% (2/32) → 100% (32/32)**。
 对应代码（`modern_blocks.MambaBlock`、`LongCtxJointEncoder` 的 hybrid 分支）保留但训练
 路径不会触发 —— ctx ≤ 32 时序列 ≤ 2048 tokens，FlashAttention-2 完整二次注意力足够。
 
-| Phase | 配置 | 推荐 batch (24 GB) | 状态 |
-|---|---|---|---|
-| 0  | V1, `context_len=2` | B=24 | ✅ `fast_dev_run` 通过 |
-| 1a | V2 enc+dec, `context_len=2`, single-GPU **non-DDP** | B=20 | ⚠️ 待测（DDP 路径被复数 buffer 卡住） |
-| 1b | V2 enc+dec, `context_len=2`, DDP | — | 🔴 阻塞：NCCL 不支持 ComplexFloat 广播 RoPE `freqs_cis` |
-| 2  | V2, `context_len=4..6` (Vimeo 上限) | B=12 | 等 Phase 1 |
-| 3a | V2, `context_len=16` (切 Kinetics) | B=4 | 等 |
-| 3b | V2, `context_len=32`（**项目终点**） | B=2 + grad_accum=4 | 等 |
-| ~~4~~ | ~~`context_len=64`~~ | — | ❌ out of scope |
-| ~~5~~ | ~~`context_len=128`~~ | — | ❌ out of scope |
+| Phase | 配置 | 状态 |
+|---|---|---|
+| 0  | V1, `context_len=2` | ✅ `fast_dev_run` 通过 @ dev box (B=1, Vimeo) |
+| 1a | V2 enc+dec, `context_len=2`, single-GPU **non-DDP** | ⚠️ 待测 |
+| 1b | V2 enc+dec, `context_len=2`, DDP | 🟡 NCCL/complex 需 6000 Ada 多 GPU 上确认 |
+| 2  | V2, `context_len=4..6` (Vimeo 上限) | 等 Phase 1 |
+| 3a | V2, `context_len=16` (切 Kinetics 5% subset) | 等 |
+| 3b | V2, `context_len=32`（**项目终点**） | 等 |
+| ~~4~~ | ~~`context_len=64`~~ | ❌ out of scope |
+| ~~5~~ | ~~`context_len=128`~~ | ❌ out of scope |
+
+**Batch size 数字目前不写**：之前估的 "Phase 0 B=24 / Phase 3b B=2" 假设过乐观，没考虑
+上游 patcher 600 MB identity-kernel 问题（见 [ARCHITECTURE.md §7 已知问题](ARCHITECTURE.md)）。
+实测：V1 ctx=2 @ 24 GB **B=2 就 OOM**。真实 batch 上限要等 6000 Ada 上重测。
 
 **训练规模预估**：单卡 RTX 5090 Laptop (~110 TFLOPS bf16)，从 Phase 0 走到 Phase 3b
 约需 **2–3 周纯训练时间**。所需数据集磁盘约 **310 GB**（Vimeo 全集 + Kinetics-400

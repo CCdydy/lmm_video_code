@@ -77,8 +77,8 @@ encoder_sep、bottlenecks）V1 / V2 完全共用，**保证 V1 路径 bit-exact*
 
 | # | 名称 | use_v2_* | ctx | 数据 | 期望 BD-rate | 主机 | 状态 |
 |---|---|---|---|---|---|---|---|
-| 0 | V1 复现 | F/F | 2 | Vimeo 全集 | 对得上 paper | 6000 Ada | ⏳ 等数据 |
-| 1a | V2 building blocks | T/T | 2 | Vimeo | ±2% | 6000 Ada | 等 P0 |
+| 0 | V1 复现 | F/F | 2 | Vimeo 全集 (~82 GB) | 对得上 paper | 6000 Ada | ✅ fast_dev_run @ dev box B=1 通过；真长跑等 6000 Ada |
+| 1a | V2 building blocks | T/T | 2 | Vimeo | ±2% | 6000 Ada | 等 P0 长跑 |
 | 1b | V2 + DDP | T/T | 2 | Vimeo | 同 1a | 6000 Ada (多卡) | 🟡 NCCL/complex 测试需多 GPU 环境 |
 | 2 | short context | T/T | 4–6 | Vimeo | −3% to −6% | 6000 Ada | 等 P1 |
 | 3a | medium context | T/T | 16 | Kinetics 5% subset | −5% to −10% | 6000 Ada | 等 P2 |
@@ -119,9 +119,30 @@ encoder_sep、bottlenecks）V1 / V2 完全共用，**保证 V1 路径 bit-exact*
 
 ⚪ **不阻塞**：
 - dev box env 完整，V1/V2 forward pass 都通过 GPU smoke test
+- **Phase 0 fast_dev_run 端到端通过** @ dev box (V1, ctx=2, B=1, Vimeo)
+- Vimeo 数据已就绪 `/home/zzy/data/vimeo_septuplet/`（91701 段 × 7 PNG = 641907，完整）
 - PyTorch SDPA flash backend 在 sm_120 上 16.5 ms / 2048 seq（已基准）
 - functional_tensor shim 在 sitecustomize.py 里就位
 - 文档（README / Design Log / DATASETS）都收敛到 ctx ≤ 32 范围
+
+---
+
+## 7. 已知问题 / Known issues
+
+### Patcher 600 MB identity-kernel 分配（上游 VCT 遗留）
+
+`neural/patcher.py:_window_partition_conv2d` 在 `patch_size ≠ stride`（encoder 路径）
+时构造 `torch.diag(ones(C × patch_size²))` = (12288 × 12288) identity kernel ≈
+**600 MB**，conv2d 期间不释放。
+
+**实测影响**（RTX 5090 24 GB, V1 ctx=2, Vimeo 7-frame sample）：
+- B=1 ✅ 通过
+- B=2 ❌ OOM（每 P-scene 600 MB × 6 P-scenes × 2 batch = 7.2 GB 仅 kernel）
+
+这让之前文档里 "Phase 0 B=24" 的估算高估了约一个数量级。真实 batch 上限要等
+6000 Ada 上重新 profile 出来。**正确修法**是把 conv2d-based partitioning 换成
+`Tensor.unfold` 纯 view 操作（零内存），但需要先验证与 V1 数值等价 ——
+**放进 Phase 1 之后的优化 backlog，不在 Phase 0 critical path**。
 
 ---
 
