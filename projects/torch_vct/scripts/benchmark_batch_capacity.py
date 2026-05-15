@@ -1,11 +1,10 @@
 """Profile peak GPU memory and per-step time at increasing batch sizes
 for both V1 and V2 entropy models at context_len=2.
 
-Designed to be cross-machine: run the same script on dev box (24 GB
-RTX 5090 LP) and on training box (48 GB RTX 6000 Ada) to see the
-real, post-patcher-fix capacity at each.
+Designed to be cross-machine: run the same script on any target GPU to record
+the real, post-patcher-fix capacity.
 
-Reference numbers measured on dev box (5090 LP, bf16-AMP, post-aa47ca1):
+Reference numbers measured on the old dev box (5090 LP, bf16-AMP, post-aa47ca1):
 
     config       B   alloc_GB   sec/step
     V1 ctx=2     1     10.17     0.340
@@ -18,7 +17,7 @@ Reference numbers measured on dev box (5090 LP, bf16-AMP, post-aa47ca1):
 Usage:
     cd projects/torch_vct
     python scripts/benchmark_batch_capacity.py \
-        --data-dir /home/zzy/data/vimeo_septuplet \
+        --data-dir '/media/zzy/mydata/vimeo-90K(3F-7F)/vimeo_septuplet' \
         --batches 1 2 4 6 8 \
         --precision bf16
 """
@@ -59,7 +58,7 @@ def run_one(B: int, data_dir: str, use_v2: bool, precision: str, n_steps: int):
             config_name="train_config",
             overrides=[
                 "datamodule=vimeo",
-                f"datamodule.data_dir={data_dir}",
+                f"datamodule.data_dir='{data_dir}'",
                 f"training_loop.train_batch_size={B}",
                 "training_loop.val_batch_size=1",
                 f"model.use_v2_encoder={use_v2}",

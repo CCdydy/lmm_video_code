@@ -93,12 +93,13 @@ def precompute_freqs_cis(dim: int, max_seq_len: int, theta: float = 10000.0) -> 
     return torch.polar(torch.ones_like(freqs), freqs)
 
 
-def apply_rotary_emb(x: Tensor, freqs_cis: Tensor) -> Tensor:
+def apply_rotary_emb(x: Tensor, freqs_cis_real: Tensor, freqs_cis_imag: Tensor) -> Tensor:
     """Apply RoPE to query or key tensor.
 
     Args:
         x: (B, num_heads, seq_len, head_dim)
-        freqs_cis: (max_seq_len, head_dim // 2) precomputed complex embeddings
+        freqs_cis_real: real part of precomputed RoPE frequencies
+        freqs_cis_imag: imaginary part of precomputed RoPE frequencies
 
     Returns:
         rotated tensor, same shape as x
@@ -106,7 +107,10 @@ def apply_rotary_emb(x: Tensor, freqs_cis: Tensor) -> Tensor:
     B, n_heads, seq_len, head_dim = x.shape
     x_ = x.float().reshape(B, n_heads, seq_len, head_dim // 2, 2)
     x_complex = torch.view_as_complex(x_)
-    freqs_cis = freqs_cis[:seq_len].to(x.device)
+    freqs_cis = torch.complex(
+        freqs_cis_real[:seq_len].to(x.device),
+        freqs_cis_imag[:seq_len].to(x.device),
+    )
     x_rotated = x_complex * freqs_cis.unsqueeze(0).unsqueeze(0)
     x_out = torch.view_as_real(x_rotated).flatten(3)
     return x_out.type_as(x)
@@ -146,9 +150,10 @@ class FlashAttnBlock(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
 
-        # Precompute RoPE frequencies (non-persistent buffer)
+        # Store RoPE as float buffers: NCCL cannot broadcast complex buffers in DDP.
         freqs_cis = precompute_freqs_cis(self.head_dim, max_seq_len)
-        self.register_buffer("freqs_cis", freqs_cis, persistent=False)
+        self.register_buffer("freqs_cis_real", freqs_cis.real, persistent=False)
+        self.register_buffer("freqs_cis_imag", freqs_cis.imag, persistent=False)
 
         # QKV in one projection (for FlashAttention compatibility)
         self.qkv_proj = nn.Linear(dim, 3 * dim, bias=False)
@@ -182,8 +187,8 @@ class FlashAttnBlock(nn.Module):
         v = v.view(B, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
 
         # Apply RoPE
-        q = apply_rotary_emb(q, self.freqs_cis)
-        k = apply_rotary_emb(k, self.freqs_cis)
+        q = apply_rotary_emb(q, self.freqs_cis_real, self.freqs_cis_imag)
+        k = apply_rotary_emb(k, self.freqs_cis_real, self.freqs_cis_imag)
 
         # FlashAttention-2 call — prefers (B, seq, n_heads, head_dim)
         q = q.transpose(1, 2).contiguous()

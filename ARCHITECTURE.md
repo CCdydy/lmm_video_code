@@ -77,8 +77,8 @@ encoder_sep、bottlenecks）V1 / V2 完全共用，**保证 V1 路径 bit-exact*
 
 | # | 名称 | use_v2_* | ctx | 数据 | 期望 BD-rate | 主机 | 状态 |
 |---|---|---|---|---|---|---|---|
-| 0 | V1 复现 | F/F | 2 | Vimeo 全集 (~82 GB) | 对得上 paper | 6000 Ada | ✅ fast_dev_run @ dev box B=1 通过；真长跑等 6000 Ada |
-| 1a | V2 building blocks | T/T | 2 | Vimeo | ±2% | 6000 Ada | 等 P0 长跑 |
+| 0 | V1 复现 | F/F | 2 | Vimeo 全集 (~82 GB) | 对得上 paper | 6000 Ada | `fast_dev_run` 通过 |
+| 1a | V2 building blocks | T/T | 2 | Vimeo | ±2% | 6000 Ada | `fast_dev_run` 通过 |
 | 1b | V2 + DDP | T/T | 2 | Vimeo | 同 1a | 6000 Ada (多卡) | 🟡 NCCL/complex 测试需多 GPU 环境 |
 | 2 | short context | T/T | 4–6 | Vimeo | −3% to −6% | 6000 Ada | 等 P1 |
 | 3a | medium context | T/T | 16 | Kinetics 5% subset | −5% to −10% | 6000 Ada | 等 P2 |
@@ -89,41 +89,40 @@ encoder_sep、bottlenecks）V1 / V2 完全共用，**保证 V1 路径 bit-exact*
 
 ---
 
-## 4. 双机分工
+## 4. 当前平台
 
-| | **dev box** RTX 5090 Laptop | **training box** RTX 6000 Ada |
-|---|---|---|
-| sm | 120 (Blackwell) | 89 (Ada Lovelace) |
-| VRAM | 24 GB | 48 GB |
-| 用途 | sanity / wiring / 单 step 调试 / 数据准备脚本 | 所有真实训练、ablation、长跑 |
-| FA-2 通路 | PyTorch SDPA flash backend (sm_120 已验证) | `flash_attn` pip 包（成熟 sm_89 wheel） |
-| ALiBi (Phase 3c) | 用 SDPA + attn_mask（慢但能跑小测） | 用 `flash_attn` alibi_slopes（in-kernel） |
-| env 状态 | ✅ 已重建并验证（torch 2.7.1+cu128） | ⏳ 待重建（git pull 后按 README 走） |
-| 数据集 | mini 子集（仅小测） | Vimeo / Kinetics 5% / UVG（**完整**） |
+当前 checkout 已在 RTX 6000 Ada 主机上，不再按“5090 dev box + 6000 Ada training box”
+分工推进。旧 5090 batch 数据只作为历史参考。
 
-代码通过 `github.com/CCdydy/lmm_video_code` 同步。
+| Item | Value |
+|---|---|
+| Host | `ZZY-Desktop` |
+| GPU | RTX 6000 Ada, sm_89, 48 GB |
+| Repo | `/home/zzy/Desktop/NeuralCompression` |
+| Training env | `/home/zzy/anaconda3/envs/torch_vct` |
+| Data | Vimeo / Kinetics / UVG raw 均在本机可访问 |
+
+完整平台记录见 [`PLATFORM.md`](PLATFORM.md)。
 
 ---
 
 ## 5. Phase 推进所需的硬阻塞 / 软阻塞
 
 🔴 **硬阻塞**：
-1. **数据集** — Vimeo 拷贝中。Phase 0 不需要 Kinetics，先 Vimeo 就够。
-2. **6000 Ada env 重建** — git pull + 按 README "Environment" 装。
+1. 决定 Phase 0 是否做短训或直接跳到 Phase 1 长训。
+2. Phase 1a 长训前用更多 benchmark steps 复测稳定吞吐。
 
 🟡 **软阻塞**：
-1. Phase 1b 的 NCCL/complex buffer bug 在 torch 2.7 + NCCL 2.26 上是否仍存在 —
-   **只能在 6000 Ada 多 GPU 环境上确认**，单卡 5090 上 2 进程 NCCL init 不稳。
-2. 如 bug 仍在 → 按已知方案 patch `modern_blocks.py`（拆 `(real, imag)` 双 float32 buffer）。
-   如 bug 修了 → 无动作。
+1. 当前机器是单卡 RTX 6000 Ada，Phase 1b 的 DDP/NCCL 只能在多 GPU 环境上验证。
+2. RoPE complex buffer 已拆成 `(real, imag)` 双 float32 buffer；单卡 DDP setup 已通过，
+   多卡 DDP 仍需复验。
 
 ⚪ **不阻塞**：
-- dev box env 完整，V1/V2 forward pass 都通过 GPU smoke test
-- **Phase 0 fast_dev_run 端到端通过** @ dev box (V1, ctx=2, B=1, Vimeo)
-- Vimeo 数据已就绪 `/home/zzy/data/vimeo_septuplet/`（91701 段 × 7 PNG = 641907，完整）
-- PyTorch SDPA flash backend 在 sm_120 上 16.5 ms / 2048 seq（已基准）
-- functional_tensor shim 在 sitecustomize.py 里就位
-- 文档（README / Design Log / DATASETS）都收敛到 ctx ≤ 32 范围
+- Vimeo 数据已就绪 `/media/zzy/mydata/vimeo-90K(3F-7F)/vimeo_septuplet`
+- Kinetics-400 完整目录已在 `/media/zzy/data/kinetics-dataset/k400`
+- UVG raw 已在 `/media/zzy/mydata/UVG` 和 `/media/zzy/mydata/UVG_720p`
+- 当前 6000 Ada 已通过 V1 与 V2 `fast_dev_run`
+- 文档（README / PLATFORM / DATASETS）已收敛到当前 6000 Ada 平台
 
 ---
 
@@ -139,12 +138,28 @@ encoder_sep、bottlenecks）V1 / V2 完全共用，**保证 V1 路径 bit-exact*
 守护：CPU 上 forward bit-exact，CUDA 上 TF32 关闭后 forward bit-exact，backward
 gradient 差 < 1 fp32 ulp。
 
-## 8. dev box batch capacity（实测，post aa47ca1）
+## 8. batch capacity
 
 复现脚本：[`scripts/benchmark_batch_capacity.py`](projects/torch_vct/scripts/benchmark_batch_capacity.py)，
-在 dev box 和 training box 上跑出来对比即可。
+当前 RTX 6000 Ada quick sweep（bf16 AMP, `--steps 1`, Vimeo 7-frame septuplet）：
 
-dev box (RTX 5090 Laptop, 24 GB, bf16 AMP, Vimeo 7-frame septuplet):
+| config | B | alloc_GB | reserved_GB | sec/step | samples/sec |
+|---|---:|---:|---:|---:|---:|
+| V1 ctx=2 | 1 | 10.15 | 10.32 | 0.507 | 1.97 |
+| V1 ctx=2 | 2 | 18.04 | 18.65 | 0.567 | 3.53 |
+| V1 ctx=2 | 4 | 33.69 | 34.15 | 0.825 | 4.85 |
+| V1 ctx=2 | 5 | 41.58 | 43.46 | 1.053 | 4.75 |
+| V1 ctx=2 | 6 | OOM | — | — | — |
+| V2 ctx=2 | 1 | 11.41 | 11.59 | 0.587 | 1.70 |
+| V2 ctx=2 | 2 | 20.48 | 20.80 | 0.600 | 3.34 |
+| V2 ctx=2 | 4 | 38.46 | 38.96 | 0.861 | 4.65 |
+| V2 ctx=2 | 5 | OOM | — | — | — |
+
+实用上限：V1 B=5，V2 B=4。长训前建议 `--steps 3` 或更高再复测一次，减少单步噪声。
+
+旧 RTX 5090 Laptop 历史参考值：
+
+historical dev box (RTX 5090 Laptop, 24 GB, bf16 AMP, Vimeo 7-frame septuplet):
 
 | config | B | alloc_GB | sec/step | samples/sec |
 |---|---|---|---|---|
@@ -155,26 +170,25 @@ dev box (RTX 5090 Laptop, 24 GB, bf16 AMP, Vimeo 7-frame septuplet):
 | V2 ctx=2 | 2 | 18.70 | 0.593 | 3.37 |
 | V2 ctx=2 | 4 | OOM | — | — |
 
-V2 只比 V1 多 ~0.7 GB（RoPE buffer + SwiGLU FFN 的开销很小）。**dev box 单 micro-step 0.57s
-@ B=2**，effective batch=8 via grad_accum=4 → 2.3s / effective step → 1M effective steps ≈ 26 天。
-
-training box (RTX 6000 Ada, 48 GB) 上的容量预计远高（至少 B=6–8），等那台空了跑一遍 benchmark 就有数。
+在当前 6000 Ada 上，V2 ctx=2 比 V1 ctx=2 多约 4.8 GB @ B=4，主要上限仍来自
+ELIC per-frame 激活。
 
 ## 9. 待决策：Phase 0 V1 复现的范围
 
-dev box 上跑完整 1M-step V1 复现需要 26 天 —— 不合理。三个候选方案：
+旧 5090 dev box 上跑完整 1M-step V1 复现需要 26 天；当前 6000 Ada 吞吐更高，但
+完整 Phase 0 仍然会挤占 V2 实验时间。候选方案仍然是：
 
-| 选项 | 内容 | 时长 (dev box) | 优势 | 风险 |
+| 选项 | 内容 | 时间 | 优势 | 风险 |
 |---|---|---|---|---|
 | **A** | **跳过 Phase 0 完整复现**，直接 Phase 1 (V2 ctx=2)，V1 baseline 用 paper 公布的 BD-rate 数字 | 0 (省略) | 最高效；马上能拿 V2 数据 | 论文需说明对比方法 |
-| **B** | Phase 0 短训练 (~200K 步, ~1.3 天)，拿 V1 早期收敛曲线作内部对比 | ~1.3 天 | 内部一致；不依赖外部数字 | 不是 paper 终值，只能做相对比较 |
-| **C** | Phase 0 完整复现 1M 步 | ~26 天 | 最严谨 | dev box 串行 26 天，6000 Ada 空了也只能干等 |
+| **B** | Phase 0 短训练 (~200K 步)，拿 V1 早期收敛曲线作内部对比 | 约 2.5 天 quick-estimate | 内部一致；不依赖外部数字 | 不是 paper 终值，只能做相对比较 |
+| **C** | Phase 0 完整复现 1M 步 | 约 12 天 quick-estimate | 最严谨 | 机会成本高 |
 
 agent 推荐 **选项 A**，理由：
 
 1. VCT paper V1 的 BD-rate 在 UVG / MCL-JCV 上已是公开 baseline。审稿人不会
    要求自己复现，写明"V1 数字取自 [VCT, NeurIPS'22]"即可。
-2. dev box 26 天浪费在复现一个已有结果，机会成本是 4–5 个 V2 sub-experiment。
+2. 完整复现一个已有结果的机会成本高，尤其会挤占 V2 sub-experiment。
 3. 选项 B 的"短训练曲线对比"本质是 noise—— V1 / V2 短训练阶段都没收敛，曲线
    形状的差异可能更多反映初始化随机性而非架构差异。
 
@@ -182,10 +196,8 @@ agent 推荐 **选项 A**，理由：
 
 ---
 
-## 6. 数据可用后的下一步
+## 6. 下一步
 
-1. 确认 Vimeo 路径结构（`sep_trainlist.txt` / `sequences/<group>/<seq>/im{1..7}.png`）
-2. 改 [vimeo.yaml](projects/torch_vct/config/datamodule/vimeo.yaml) 的 `data_dir`
-3. 本机跑 Phase 0 `fast_dev_run`（1 step 端到端，B=1，只验 wiring）
-4. 跑通后 commit
-5. 6000 Ada env 建起来 → 同步数据 + 代码 → 开始 Phase 0 真长跑
+1. 决定 Phase 0 采用 A/B/C 哪个复现范围。
+2. Phase 1a 长训：V2 enc+dec, `context_len=2`, single-GPU non-DDP。
+3. Phase 2/3：先 Vimeo `context_len=4..6`，再 Kinetics 5% 子集 `context_len=16/32`。

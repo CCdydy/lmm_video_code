@@ -181,12 +181,13 @@ Both flags default to `False`. The V1 path is a pure conditional branch—zero c
 
 **Project scope (2026-05 revision)**: terminal target is `context_len=32`. Phases 4
 and 5 from the original plan (ctx=64 / ctx=128, requiring hybrid attention and
-Mamba) are deferred indefinitely. Compute budget is a single RTX 5090 Laptop
-(24 GB VRAM); the full ctx-128 path was never realistic on this hardware without
-ZeRO/offload, and the project doesn't need it to make its core claim
+Mamba) are deferred indefinitely. The current platform is a single RTX 6000 Ada
+(48 GB VRAM); the full ctx-128 path remains out of scope, and the project
+doesn't need it to make its core claim
 (*long-but-tractable* context > 2 frames improves RD-rate).
 
-Total wall-clock from Phase 0 to Phase 3b ≈ **2–3 weeks** of single-GPU training.
+Total wall-clock from Phase 0 to Phase 3b must be re-estimated after the current
+6000 Ada batch-capacity benchmark.
 
 ### Phase 0: Sanity Check (current)
 
