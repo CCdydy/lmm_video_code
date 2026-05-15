@@ -1,0 +1,125 @@
+# VCT V2: Long-Context Spatiotemporal Entropy Model
+
+把 VCT (Mentzer et al., NeurIPS 2022) 的 joint spatiotemporal self-attention
+从 **2 帧** 扩展到 **128 帧**，用 LLM 长上下文工具箱（FlashAttention-2 / RoPE / RMSNorm / SwiGLU / Mamba）
+让"多帧联合自注意力"这个早期被算力限制锁死的设计可以真正放大。
+
+详细设计与各 phase 实验计划见 [`VCT_V2_Design_Log.md`](VCT_V2_Design_Log.md)。
+数据集路径与可用性见 [`DATASETS.md`](DATASETS.md)。
+
+---
+
+## Status
+
+| Phase | 配置 | 状态 |
+|---|---|---|
+| 0  | V1, `context_len=2` | ✅ `fast_dev_run` 通过 |
+| 1a | V2 enc+dec, `context_len=2`, single-GPU **non-DDP** | ⚠️ 待测（DDP 路径被复数 buffer 卡住） |
+| 1b | V2 enc+dec, `context_len=2`, DDP | 🔴 阻塞：NCCL 不支持 ComplexFloat 广播 RoPE `freqs_cis` |
+| 2  | V2, `context_len=4..6` (Vimeo 上限) | 等 Phase 1 |
+| 3  | V2, `context_len=8..32` (切 Kinetics) | 等 |
+| 4  | V2, `context_len=64` (hybrid 激活) | 等 |
+| 5  | V2, `context_len=128` (KV-cache + Mamba) | 等 |
+
+**已知开放问题**：V2 路径下 DDP setup 阶段，RoPE 预计算的 `freqs_cis` 是 complex64 buffer，
+被 `_sync_module_states` 广播时 NCCL 报错。修法：在 `modern_blocks.py` 里把它拆成
+`(real, imag)` 两个 float32 buffer 存，`apply_rotary_emb` 内部 `torch.complex(...)` 重组。
+
+---
+
+## Repo Layout
+
+```
+NeuralCompression/
+├── projects/torch_vct/           ← 唯一活跃项目
+│   ├── neural/                   ← V1 + V2 transformer / RoPE / Mamba / 量化层
+│   │   ├── entropy_model.py
+│   │   ├── entropy_model_layers.py
+│   │   ├── modern_blocks.py      ← V2 新增（RoPE / SwiGLU / FlashAttn / Mamba）
+│   │   ├── bottlenecks.py
+│   │   ├── transforms.py         ← ELIC analysis / synthesis
+│   │   └── patcher.py
+│   ├── datamodules/              ← Vimeo / Kinetics / UVG
+│   ├── config/                   ← hydra YAML
+│   ├── utils/  tests/
+│   ├── model_pipeline.py         ← VCTPipeline
+│   ├── model_lightning.py        ← LightningModule（已 PL-2.x 适配）
+│   └── model_train.py            ← 入口
+├── neuralcompression/            ← 上游核心包；本项目只用 Vimeo90kSeptuplet
+├── VCT_V2_Design_Log.md
+├── DATASETS.md
+└── setup.{py,cfg} / pyproject.toml
+```
+
+---
+
+## Environment
+
+环境已建好，**不要再次 `conda create`**。所有命令一律用绝对路径，**不要依赖 `conda activate`**。
+
+- 路径：`/home/zzy/anaconda3/envs/torch_vct/`
+- 关键版本：Python 3.10 / torch 2.1.2+cu121 / pytorch-lightning 2.1.4 /
+  torchmetrics 1.3.0 / hydra-core 1.3.2 / numpy 1.26.4 / setuptools 80.10.2 /
+  compressai 1.2.8 / pytorchvideo 0.1.5
+- GPU：RTX 6000 Ada (sm_89)。torch 2.1.2 没有原生 sm_89 binary，首次 kernel 启动会
+  PTX-JIT 编译（几秒一次性开销），稳态性能不受影响。
+
+**重装时的两个坑**（如果需要重建 env）：
+
+1. 仓库没有 `.git`，setuptools_scm 拿不到版本号，必须：
+   ```bash
+   SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NEURALCOMPRESSION=0.3.0 \
+     /home/zzy/anaconda3/envs/torch_vct/bin/pip install -e /home/zzy/Desktop/NeuralCompression
+   ```
+2. setuptools ≥ 81 删了 `pkg_resources`，lightning 2.1 还在用：
+   ```bash
+   /home/zzy/anaconda3/envs/torch_vct/bin/pip install 'setuptools<81'
+   ```
+
+---
+
+## Running
+
+### V1 baseline `fast_dev_run`（验证过通过）
+
+```bash
+cd /home/zzy/Desktop/NeuralCompression/projects/torch_vct
+/home/zzy/anaconda3/envs/torch_vct/bin/python model_train.py \
+  datamodule=vimeo \
+  "datamodule.data_dir='/media/zzy/mydata/vimeo-90K(3F-7F)/vimeo_septuplet'" \
+  trainer.fast_dev_run=true \
+  ngpu=1 \
+  num_workers_per_task=0 \
+  'hydra.run.dir=/tmp/torch_vct_fastdev'
+```
+
+**注意 Vimeo 路径里的 `()`**：shell 单引号会被剥掉，hydra 看到裸括号会报
+override grammar 错。正确做法是 *shell 外层双引号 + hydra 内层单引号* 嵌套
+（如上 `datamodule.data_dir='...'` 整段被外层双引号包住）。
+
+### V2 enc+dec sanity（DDP 修复后跑）
+
+```bash
+... model.use_v2_encoder=true model.use_v2_decoder=true ...
+```
+
+---
+
+## Code Modifications Applied
+
+| 文件 | 改动 | 原因 |
+|---|---|---|
+| `projects/torch_vct/neural/modern_blocks.py` | 新增（~393 行）：RMSNorm / SwiGLU_FFN / RoPE / FlashAttnBlock / LongCtxJointEncoder / MambaBlock | V2 基础设施 |
+| `.../neural/entropy_model_layers.py` | 末尾追加 `TransformerBlockV2`, `TransformerV2`（原类全部保留） | V2 transformer stack |
+| `.../neural/entropy_model.py` | 加 `use_v2_encoder` / `use_v2_decoder` 开关；`_get_encoded_seqs` 支持任意 `context_len`，开头帧不足时 left-pad 最早 latent | V2 接线 + 多帧支持 |
+| `.../model_pipeline.py` | 把 v2 flags 透传给 `VCTEntropyModel` | 配置传递 |
+| `.../model_lightning.py:47` | 删掉 `training_step` 的 `optimizer_idx` 参数 | PL 1.7 → 2.x：有此参数会被推断为 multi-optim |
+| `.../config/train_config.yaml` | 显式默认 `context_len=2 / use_v2_encoder=False / use_v2_decoder=False` | baseline 行为清晰 |
+
+V1 路径与原 VCT bit-exact，所有 V2 改动都在 `if use_v2_*:` 分支内。
+
+---
+
+## License
+
+MIT，见 [`LICENSE`](LICENSE)。
