@@ -90,8 +90,14 @@ class Scenes(NamedTuple):
 
     def validate_shapes(self):
         """Raise ValueError if we have invalid shapes."""
-        if self.tensor.dtype != torch.float32:
-            raise ValueError("Expected float32")
+        # Accept any floating-point dtype so mixed-precision (bf16 / fp16
+        # autocast) is allowed. The original code hard-required float32,
+        # which broke torch.amp.autocast since the latent tensor coming
+        # out of analysis_transform is downcast to bf16 inside the autocast
+        # region. Shape correctness is what this validator actually cares
+        # about.
+        if not self.tensor.is_floating_point():
+            raise ValueError(f"Expected floating-point dtype, got {self.tensor.dtype}")
         if self.tensor.dim() != 5:
             raise ValueError(f"Expected (B, T, C, H, W), got {self.tensor.shape}")
 

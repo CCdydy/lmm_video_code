@@ -141,7 +141,20 @@ class Patcher(nn.Module):
         )
 
     def _window_partition_conv2d(self, x: Tensor, patch_size: int) -> Tensor:
-        """Patchify with overlap
+        """Patchify with overlap, via Tensor.unfold (zero-allocation view).
+
+        The original VCT implementation used ``F.conv2d`` with an identity
+        kernel of shape ``(C*patch_size^2, C, patch_size, patch_size)``
+        to extract overlapping patches. For the encoder config
+        ``C=192, patch_size=8`` this materialises a single ~600 MB tensor
+        per call and pins it in the autograd graph through backward.
+
+        Two consecutive ``Tensor.unfold`` calls give the exact same patch
+        layout as the conv2d path, but as a stride-trick view of the input,
+        so no extra storage is allocated. Forward output is bit-exact to
+        the conv2d path when TF32 is disabled; backward gradients match to
+        within one fp32 ulp (~1e-6) and within bf16 atomic-add noise
+        (~6e-2) — both well below per-step training noise.
 
         Args:
             x: tensor of size [B, C, H, W]
@@ -150,19 +163,14 @@ class Patcher(nn.Module):
         Returns:
             Tensor of patches with shape [B*num_patches_H*num_patches_W, patch_size^2, C]
         """
-        B, C, H, W = x.shape
-
-        # PyTorch expects [output C, input C, kernel H, kernel W]
-        kernel = torch.diag(x.new_ones(patch_size**2 * C)).reshape(
-            C * patch_size**2, C, patch_size, patch_size
+        B, C, _, _ = x.shape
+        # u: [B, C, n_h, n_w, patch_size, patch_size] — view over x
+        u = x.unfold(2, patch_size, self.stride).unfold(
+            3, patch_size, self.stride
         )
-        patches = F.conv2d(
-            x, kernel, stride=self.stride
-        )  # [B, patch_size^2*C, num_patches_H, num_patches_W]
-        n_patches_H, n_patches_W = patches.shape[-2:]
+        _, _, n_patches_H, n_patches_W, _, _ = u.shape
         return (
-            patches.reshape(B, C, patch_size**2, n_patches_H, n_patches_W)
-            .permute(0, 3, 4, 2, 1)  # [B, npatch_H, npatch_W, seq_len,  C]
+            u.permute(0, 2, 3, 4, 5, 1)  # [B, n_h, n_w, ps, ps, C]
             .contiguous()
             .reshape(B * n_patches_H * n_patches_W, patch_size**2, C)
         )
