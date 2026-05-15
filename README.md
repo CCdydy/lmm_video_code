@@ -55,26 +55,54 @@ NeuralCompression/
 
 ## Environment
 
-环境已建好，**不要再次 `conda create`**。所有命令一律用绝对路径，**不要依赖 `conda activate`**。
+环境已建好，**不要再次 `mamba create`**。所有命令一律用绝对路径，**不要依赖 `conda activate`**。
 
-- 路径：`/home/zzy/anaconda3/envs/torch_vct/`
-- 关键版本：Python 3.10 / torch 2.1.2+cu121 / pytorch-lightning 2.1.4 /
-  torchmetrics 1.3.0 / hydra-core 1.3.2 / numpy 1.26.4 / setuptools 80.10.2 /
-  compressai 1.2.8 / pytorchvideo 0.1.5
-- GPU：RTX 6000 Ada (sm_89)。torch 2.1.2 没有原生 sm_89 binary，首次 kernel 启动会
-  PTX-JIT 编译（几秒一次性开销），稳态性能不受影响。
+- 路径：`/home/zzy/miniforge3/envs/torch_vct/`
+- 关键版本：Python 3.10 / **torch 2.7.1+cu128** / **pytorch-lightning 2.5.6** /
+  **torchmetrics 1.9.0** / hydra-core 1.3.2 / numpy 1.26.4 / scipy 1.11.1 /
+  setuptools 80.10.2 / compressai 1.2.8 / pytorchvideo 0.1.5
+- GPU：**RTX 5090 Laptop (sm_120, Blackwell)**，driver 595.58.03。torch 2.7.1
+  的 cu128 wheel 含原生 sm_120 binary，**不再需要 PTX-JIT**（架构列表里 `sm_120`
+  + `compute_120` 都在）。
+- 旧 docs 里钉的 torch 2.1.2 / lightning 2.1.4 不适用本机：RTX 5090 是 Blackwell，
+  torch ≤ 2.6 没有 sm_120 binary 也无法 JIT。
 
-**重装时的两个坑**（如果需要重建 env）：
+**重建 env 的步骤**（顺序敏感）：
 
-1. 仓库没有 `.git`，setuptools_scm 拿不到版本号，必须：
-   ```bash
-   SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NEURALCOMPRESSION=0.3.0 \
-     /home/zzy/anaconda3/envs/torch_vct/bin/pip install -e /home/zzy/Desktop/NeuralCompression
-   ```
-2. setuptools ≥ 81 删了 `pkg_resources`，lightning 2.1 还在用：
-   ```bash
-   /home/zzy/anaconda3/envs/torch_vct/bin/pip install 'setuptools<81'
-   ```
+```bash
+# 1. 建 env
+/home/zzy/miniforge3/bin/mamba create -n torch_vct python=3.10 pip -c conda-forge -y
+
+# 2. 钉 setuptools < 81（setuptools 81 删了 pkg_resources，会牵连若干旧包）
+/home/zzy/miniforge3/envs/torch_vct/bin/pip install 'setuptools<81'
+
+# 3. torch 2.7.1 + cu128（必须从 pytorch 官方 index 拉 cu128 轮子）
+/home/zzy/miniforge3/envs/torch_vct/bin/pip install \
+  --index-url https://download.pytorch.org/whl/cu128 \
+  torch==2.7.1 torchvision==0.22.1
+
+# 4. 科学栈（hydra/lightning/compressai/pytorchvideo/…）
+/home/zzy/miniforge3/envs/torch_vct/bin/pip install \
+  'numpy<2' 'scipy<=1.11.1' \
+  'pytorch-lightning>=2.4,<2.6' 'torchmetrics>=1.5,<2' \
+  hydra-core==1.3.2 'omegaconf>=2.3,<3' \
+  compressai==1.2.8 pytorchvideo==0.1.5 \
+  fvcore lpips DISTS-pytorch torch-fidelity \
+  tqdm pillow wandb av pytest pytest-timeout
+
+# 5. 项目代码（editable）。如果 .git 没 tag 或仓库刚 init，
+#    setuptools_scm 拿不到版本号，必须用 SETUPTOOLS_SCM_PRETEND_VERSION 兜底：
+SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NEURALCOMPRESSION=0.3.0 \
+  /home/zzy/miniforge3/envs/torch_vct/bin/pip install -e /home/zzy/NeuralCompression
+```
+
+**已知兼容性 shim**：pytorchvideo 0.1.5（2022 年后未更新）在 `transforms/augmentations.py`
+里 `import torchvision.transforms.functional_tensor as F_t`，但 torchvision ≥ 0.17
+已把该模块改名为 `_functional_tensor`（私有路径）。env 内已放了
+[`sitecustomize.py`](/home/zzy/miniforge3/envs/torch_vct/lib/python3.10/site-packages/sitecustomize.py)
+在 Python 启动时把 `_functional_tensor` 别名回 `functional_tensor`。**升级 pytorchvideo
+或重建 env 后需要重写这个 shim 文件**，否则 `from pytorchvideo.transforms import ...`
+直接 ImportError。
 
 ---
 
@@ -83,8 +111,8 @@ NeuralCompression/
 ### V1 baseline `fast_dev_run`（验证过通过）
 
 ```bash
-cd /home/zzy/Desktop/NeuralCompression/projects/torch_vct
-/home/zzy/anaconda3/envs/torch_vct/bin/python model_train.py \
+cd /home/zzy/NeuralCompression/projects/torch_vct
+/home/zzy/miniforge3/envs/torch_vct/bin/python model_train.py \
   datamodule=vimeo \
   "datamodule.data_dir='/media/zzy/mydata/vimeo-90K(3F-7F)/vimeo_septuplet'" \
   trainer.fast_dev_run=true \
