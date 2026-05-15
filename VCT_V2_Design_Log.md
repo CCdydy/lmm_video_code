@@ -58,13 +58,18 @@ VCT V1:  encoder_joint = EncoderSection(2 layers, GELU-MLP, LayerNorm, LearnedPo
                               Output: (B' ×   128 × 768)
 
 VCT V2:  encoder_joint = LongCtxJointEncoder(4 layers, SwiGLU, RMSNorm, RoPE)
-                              Input:  (B' × N×64 × 768)    for N up to 128
+                              Input:  (B' × N×64 × 768)    for N up to 32 (project target)
                               Output: (B' × N×64 × 768)
 ```
 
-### 2.2 LongCtxJointEncoder: Hybrid Local-Global Attention
+> **Scope note (2026-05)**: project target is **N ≤ 32**; the hybrid local-global
+> path described in §2.2 below is kept as future work but is NOT exercised by any
+> phase in the active roadmap (§4). For N ≤ 32 the encoder degenerates to a stack
+> of plain FlashAttnBlock layers operating on the full sequence.
 
-For N ≤ 32, the entire sequence (N × 64 ≤ 2048 tokens) fits in FlashAttention-2 with full quadratic attention. For N > 32, we employ a hybrid architecture:
+### 2.2 LongCtxJointEncoder: Hybrid Local-Global Attention (out of scope for current roadmap)
+
+For N ≤ 32, the entire sequence (N × 64 ≤ 2048 tokens) fits in FlashAttention-2 with full quadratic attention — this is what the project actually uses. The hybrid architecture below was originally designed for N > 32; it is preserved in the codebase but unused under the narrowed roadmap.
 
 ```
 Input: seq (B' × N×64 × 768)
@@ -166,6 +171,15 @@ Both flags default to `False`. The V1 path is a pure conditional branch—zero c
 
 ## 4. Experimental Roadmap
 
+**Project scope (2026-05 revision)**: terminal target is `context_len=32`. Phases 4
+and 5 from the original plan (ctx=64 / ctx=128, requiring hybrid attention and
+Mamba) are deferred indefinitely. Compute budget is a single RTX 5090 Laptop
+(24 GB VRAM); the full ctx-128 path was never realistic on this hardware without
+ZeRO/offload, and the project doesn't need it to make its core claim
+(*long-but-tractable* context > 2 frames improves RD-rate).
+
+Total wall-clock from Phase 0 to Phase 3b ≈ **2–3 weeks** of single-GPU training.
+
 ### Phase 0: Sanity Check (current)
 
 - `use_v2_encoder=False, use_v2_decoder=False, context_len=2`
@@ -175,44 +189,53 @@ Both flags default to `False`. The V1 path is a pure conditional branch—zero c
 ### Phase 1: Building Block Upgrade (Experiment 1)
 
 - `use_v2_encoder=True, use_v2_decoder=True, context_len=2`
-- Same data as VCT V1, only modernized primitives
+- Same data (Vimeo) as VCT V1, only modernized primitives
 - Expected: BD-rate ±2% of V1 baseline
 - This validates that RMSNorm + SwiGLU + RoPE + FlashAttn don't hurt
 
 ### Phase 2: Short Context Extension (Experiment 2)
 
-- `use_v2_encoder=True, use_v2_decoder=True, context_len=4`
-- Requires: minor dataloader change to serve 4-frame groups
-- Expected: BD-rate improvement 2-5%
+- `use_v2_encoder=True, use_v2_decoder=True, context_len=4..6`
+- Vimeo septuplet upper bound is 7 frames, so 6 is the max here
+- Expected: BD-rate improvement 2–5%
 - First real test of whether longer context helps
 
-### Phase 3: Medium Context (Experiment 3)
+### Phase 3a: Medium Context (Experiment 3, primary contribution)
 
-- `context_len=8` to `context_len=32`
-- Full FlashAttention-2 can still handle this (≤2048 tokens)
-- Expected: BD-rate improvement 5-10%
+- `context_len=16`, requires switching to Kinetics-400 subset
+- Pure FlashAttn-2 over 1024-token sequences
+- Per-device B=4, no special tricks needed
+- Expected: BD-rate improvement 5–8%
 
-### Phase 4: Long Context (Experiment 4)
+### Phase 3b: Long-end Context (Experiment 4, terminal)
 
-- `context_len=64`
-- Hybrid local+global branches become active
-- Expected: BD-rate improvement 8-12%
+- `context_len=32`, Kinetics subset
+- 2048-token sequences — FlashAttn-2 still handles it directly
+- Per-device B=2 with `accumulate_grad_batches=4` to keep effective batch=8
+- Expected: BD-rate improvement 8–12%
+- **This is where the project stops.** Going beyond requires either bigger VRAM
+  or the hybrid/Mamba path that §2.2 describes.
 
-### Phase 5: Very Long Context (Experiment 5)
+### Out of scope (originally Phase 4 / 5)
 
-- `context_len=128`
-- Add KV-cache compression, swap global branch to Mamba
-- Expected: BD-rate improvement 10-15%
+- `context_len ≥ 64`: would need to revive the hybrid local-global path in
+  `LongCtxJointEncoder` or swap in `MambaBlock` for the global branch.
+- KV-cache compression for inference.
+- Multi-GPU FSDP / ZeRO.
+
+These are documented in §2.2 and `modern_blocks.py` for completeness but no
+experiments target them.
 
 ### Ablation Matrix
 
-Each phase can independently toggle `use_v2_encoder` and `use_v2_decoder` to measure the contribution of encoder vs decoder modernization. Additionally:
+Each phase can independently toggle `use_v2_encoder` and `use_v2_decoder` to measure the contribution of encoder vs decoder modernization. Within scope:
 
-- Gate value: trainable vs fixed
-- `mid_window_frames`: 4, 8, 16, 32
-- Global branch: FlashAttn vs Mamba (for N≥64)
-- RoPE theta base: 10K vs 100K (for longer sequences)
+- Gate value: trainable vs fixed (gate is a no-op for ctx ≤ 32 if hybrid is bypassed)
+- RoPE theta base: 10K vs 100K (the latter for ctx=32)
 - Frame embedding: present vs absent
+- Effective batch via `accumulate_grad_batches`: 8 vs 16
+
+Removed ablations (out of scope): `mid_window_frames` sweep, Global branch FlashAttn vs Mamba.
 
 ---
 

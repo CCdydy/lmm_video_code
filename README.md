@@ -11,19 +11,30 @@
 
 ## Status
 
-| Phase | 配置 | 状态 |
-|---|---|---|
-| 0  | V1, `context_len=2` | ✅ `fast_dev_run` 通过 |
-| 1a | V2 enc+dec, `context_len=2`, single-GPU **non-DDP** | ⚠️ 待测（DDP 路径被复数 buffer 卡住） |
-| 1b | V2 enc+dec, `context_len=2`, DDP | 🔴 阻塞：NCCL 不支持 ComplexFloat 广播 RoPE `freqs_cis` |
-| 2  | V2, `context_len=4..6` (Vimeo 上限) | 等 Phase 1 |
-| 3  | V2, `context_len=8..32` (切 Kinetics) | 等 |
-| 4  | V2, `context_len=64` (hybrid 激活) | 等 |
-| 5  | V2, `context_len=128` (KV-cache + Mamba) | 等 |
+**项目实际目标范围（2026-05 修订）**：终点是 **context_len ≤ 32**，**不再追 64 / 128**。
+原 Phase 4（hybrid 激活）和 Phase 5（KV-cache + Mamba）降级为 out of scope，
+对应代码（`modern_blocks.MambaBlock`、`LongCtxJointEncoder` 的 hybrid 分支）保留但训练
+路径不会触发 —— ctx ≤ 32 时序列 ≤ 2048 tokens，FlashAttention-2 完整二次注意力足够。
+
+| Phase | 配置 | 推荐 batch (24 GB) | 状态 |
+|---|---|---|---|
+| 0  | V1, `context_len=2` | B=24 | ✅ `fast_dev_run` 通过 |
+| 1a | V2 enc+dec, `context_len=2`, single-GPU **non-DDP** | B=20 | ⚠️ 待测（DDP 路径被复数 buffer 卡住） |
+| 1b | V2 enc+dec, `context_len=2`, DDP | — | 🔴 阻塞：NCCL 不支持 ComplexFloat 广播 RoPE `freqs_cis` |
+| 2  | V2, `context_len=4..6` (Vimeo 上限) | B=12 | 等 Phase 1 |
+| 3a | V2, `context_len=16` (切 Kinetics) | B=4 | 等 |
+| 3b | V2, `context_len=32`（**项目终点**） | B=2 + grad_accum=4 | 等 |
+| ~~4~~ | ~~`context_len=64`~~ | — | ❌ out of scope |
+| ~~5~~ | ~~`context_len=128`~~ | — | ❌ out of scope |
+
+**训练规模预估**：单卡 RTX 5090 Laptop (~110 TFLOPS bf16)，从 Phase 0 走到 Phase 3b
+约需 **2–3 周纯训练时间**。所需数据集磁盘约 **310 GB**（Vimeo 全集 + Kinetics-400
+随机 5% 子集 + UVG 抽帧）。详见 [`DATASETS.md`](DATASETS.md)。
 
 **已知开放问题**：V2 路径下 DDP setup 阶段，RoPE 预计算的 `freqs_cis` 是 complex64 buffer，
 被 `_sync_module_states` 广播时 NCCL 报错。修法：在 `modern_blocks.py` 里把它拆成
 `(real, imag)` 两个 float32 buffer 存，`apply_rotary_emb` 内部 `torch.complex(...)` 重组。
+（torch 已升到 2.7.1，要先验证此 bug 是否还存在再决定是否修。）
 
 ---
 
