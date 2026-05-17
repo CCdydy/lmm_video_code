@@ -65,10 +65,26 @@ loss = NLL(y_hat) + scope cost regularization
 5. scope cost regularization
 6. KV cache speed test
 
-当前 active baseline：**Exp 0a = DCVC-RT 官方 inference on UVG_1080p**。本机
-`/home/zzy/Desktop/DCVC/out_bin/UVG` 已观察到 28 `.bin` + 28 `.json`，覆盖
-7 个 UVG sequences × 4 个 rate points。下一步是把该 baseline 与 DCVC-RT paper
-Fig. 1 / 官方数字对齐；偏差超过阈值时先 debug 环境和数据，不进入 ACA。
+当前状态：
+
+```text
+Step 0a: passed within locally verifiable scope
+    DCVC-RT official inference on UVG_1080p completed:
+    7 sequences × 4 rate points = 28 jobs
+    28 .bin + 28 .json under /home/zzy/Desktop/DCVC/out_bin/UVG
+    RTX 6000 Ada speed: ~118.1 fps encode / ~101.5 fps decode
+
+Step 0b: not passed yet
+    within-sequence signal exists
+    attention is unstable across seeds
+    cross-sequence generalization fails
+
+Next:
+    run multi-sequence Step 0b+ before locking architecture or entering Step 1
+```
+
+因此现在不直接进 Step 1，也不切 Pivot 3。下一轮 probe 必须覆盖多条 sequence，并同时比较
+identity、mean-pool K=8、naive attention K=8、stabilized attention K=8。
 
 ---
 

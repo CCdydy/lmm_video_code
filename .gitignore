@@ -160,3 +160,8 @@ neuralcompression/version.py
 
 # logs created by hydra
 **/run-logs/**
+
+# ACA-RT local probe artifacts
+projects/aca_rt/**/*.pt
+projects/aca_rt/**/*.log
+projects/aca_rt/**/__pycache__/

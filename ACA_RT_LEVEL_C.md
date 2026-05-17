@@ -73,7 +73,8 @@ codec backbone.
 | Step | Experiment | Purpose |
 |---|---|---|
 | 0a | DCVC-RT official inference on UVG_1080p | Establish official baseline, bitstreams, and environment sanity. |
-| 0b | Frozen-latent entropy-prior probe | Decide whether frozen DCVC-RT latents can benefit from a stronger entropy model. |
+| 0b | Single-sequence frozen-latent entropy-prior probe | Early signal check only; not sufficient for architecture lock. |
+| 0b+ | Multi-sequence frozen-latent entropy-prior probe | Verify content generalization before Step 1. |
 | 1 | Fixed last-2 / last-8 / last-32 context | Measure context-length sensitivity without adaptive gating. |
 | 2 | Multi-scope attention without gate | Test whether combined context scopes help before adding token routing. |
 | 3 | ACA per-token gate | Let each token choose C0/C2/C8/C32 adaptively. |
@@ -111,15 +112,137 @@ Observed local baseline outputs:
 
 Current quick aggregate over the 28 JSON files:
 
-| Rate point | Avg bpp | Avg PSNR | Avg enc s/frame | Avg dec s/frame |
-|---:|---:|---:|---:|---:|
-| q0 | 0.001015 | 33.1607 | 0.00766 | 0.00930 |
-| q21 | 0.003988 | 37.0718 | 0.00772 | 0.00943 |
-| q42 | 0.015307 | 40.2366 | 0.00844 | 0.00965 |
-| q63 | 0.054057 | 42.8234 | 0.01004 | 0.01103 |
+| Rate point | QP | Avg bpp | Avg PSNR YUV | Avg PSNR Y | Avg enc ms/frame | Avg dec ms/frame |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 0 | 0.0010 | 33.16 | 31.25 | 7.66 | 9.30 |
+| 1 | 21 | 0.0040 | 37.07 | 35.51 | 7.72 | 9.42 |
+| 2 | 42 | 0.0153 | 40.24 | 39.08 | 8.44 | 9.65 |
+| 3 | 63 | 0.0541 | 42.82 | 42.07 | 10.04 | 11.03 |
 
-These numbers are not yet the final BD-rate claim. They are the local baseline
-curve that must be checked against official/paper numbers before ACA training.
+Overall speed on RTX 6000 Ada is about 118.1 fps encode / 101.5 fps decode.
+The paper reports 125.2 / 112.8 fps on A100, so the local speed is within a
+reasonable hardware/software gap. The RD curve is monotonic, spans about 9.7 dB,
+and per-sequence bpp differences match expected content difficulty. Step 0 is
+therefore considered passed within the locally verifiable scope. Exact BD-rate
+alignment against paper Fig. 1/2 is still the final sanity check before making
+paper-level claims.
+
+## Step 0b Status
+
+Current verdict:
+
+```text
+Step 0b: not passed yet
+Reason:
+    within-sequence signal exists
+    attention is unstable
+    cross-sequence generalization fails
+Next:
+    run multi-sequence Step 0b+ before architecture lock
+```
+
+The single-sequence probe is useful as an early warning, but it is not a pass
+criterion. Bosphorus can improve, which means historical context contains signal
+for predicting `y`. HoneyBee regresses heavily under a Bosphorus-trained
+correction, which means the learned module is currently sequence-specific rather
+than a general temporal entropy prior. The current failure mode is not "context
+has no signal"; it is "the ACA module has not learned when to leave a good
+DCVC-RT prior unchanged."
+
+Attention is not stable enough to be the locked mainline yet. Re-running the
+same attention probe with different random initialization can swing validation
+from a large gain to nearly flat. Mean-pool memory is a strong fallback because
+it is deterministic and has shown same-sequence gains, but it is not yet a
+replacement for Level C. It shows that pooled temporal memory carries signal and
+should be included in the expanded probe.
+
+## Step 0b+ Multi-sequence Probe
+
+Decision:
+
+```text
+Do not enter Step 1 yet.
+Do not pivot to Pivot 3 yet.
+Run multi-sequence Step 0b+.
+```
+
+Minimum sequence coverage:
+
+```text
+train mix:
+    Bosphorus
+    HoneyBee
+    Beauty
+    one high-motion sequence: Jockey / ReadySteadyGo / YachtRide
+
+held-out:
+    another completely unseen sequence
+```
+
+The mix must cover static background, slow motion, camera pan, fast motion, low
+bpp sequences, and high bpp sequences. Otherwise the probe can learn a
+content-specific correction direction and still look good on same-sequence
+validation.
+
+Run four models side by side:
+
+| ID | Model | Purpose |
+|---|---|---|
+| M0 | identity / no change | Sanity baseline; must exactly preserve DCVC-RT prior. |
+| M1 | mean-pool K=8 | Deterministic strong baseline for pooled memory. |
+| M2 | naive attention K=8 | Current attention implementation, measured honestly. |
+| M3 | stabilized attention K=8 | Candidate mainline attention with residual-safe initialization. |
+
+Stabilized attention requirements:
+
+```text
+C_adapt = C_rt + gamma * DeltaC
+
+gamma init: 0 or 0.01
+attention out_proj: zero-init
+scope gate: initialized toward C_rt / identity
+normalization: LayerNorm or RMSNorm before qkv
+optimizer: smaller LR for qkv projections
+schedule: longer warmup
+training: gradient clipping
+reporting: 3 seeds, mean and std
+```
+
+The identity path must be safe at initialization. ACA should not begin training
+by applying a large context rewrite such as a 0.79-strength correction to a
+low-bpp sequence whose original prior is already accurate.
+
+Pass criteria:
+
+```text
+PASS:
+    mixed-train validation NLL / estimated bpp decreases
+    held-out frames decrease
+    held-out sequence delta <= 0, or at worst mild regression < +2%
+    attention seed variance is controlled
+    learned gate does not always choose strong context modification
+
+FAIL:
+    held-out sequence remains > +10% worse
+    or attention seed variance remains > 5 percentage points
+```
+
+Interpretation tree:
+
+```text
+Result A:
+    attention generalizes across sequences and seeds are stable
+    → continue Level C as planned
+
+Result B:
+    mean-pool generalizes, attention remains unstable
+    → downgrade Level C mainline to pooled memory + lightweight gate
+      and keep attention as a later optional refinement
+
+Result C:
+    both mean-pool and attention fail cross-sequence validation
+    → abandon this ACA prior form and revisit Pivot 3 / conservative context bank
+```
 
 ## Final Story
 
@@ -128,4 +251,3 @@ or implicit. ACA-RT upgrades that path into decoder-synchronized long-context
 memory. RoPE, FlashAttention-style attention, and KV cache make the memory
 mechanism practical enough to test whether adaptive temporal context lowers
 content latent entropy without changing the frozen codec backbone.
-
