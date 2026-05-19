@@ -1,17 +1,75 @@
-# Level C: LLM-style ACA-RT
+# ACA-RT Project Plan
+
+## Project Identity
+
+| Field | Value |
+|---|---|
+| Working name | ACA-RT: Adaptive Context Aggregation for Real-Time Neural Video Compression |
+| Backup name | LCA-NVC, if the final real-time claim does not hold |
+| Backbone | DCVC-RT (Microsoft, CVPR 2025), frozen plug-in style |
+| One-line paper positioning | Preserve DCVC-RT's implicit single-state propagation while giving the entropy model explicit lossless access to past-K decoded features, so it can choose temporal scope per latent position. |
+| DCVC-family narrative | DCVC (2021) through DCVC-FM (2024) rely on explicit motion; DCVC-RT (2025) removes motion and uses implicit single-state propagation; ACA-RT does not revive motion, but expands that implicit state into explicit multi-scope memory. |
+| Time budget | 8 months, counted from 2026-05-15 |
 
 Final project direction:
 
-> In a frozen DCVC-RT backbone, replace or augment the original temporal entropy
-> prior with LLM-style long-context mechanisms, so each latent token can
-> adaptively choose whether to use recent 2-frame, 8-frame, or 32-frame history
-> when coding the content latent.
+> In a frozen DCVC-RT backbone, use LLM-style long-context memory to augment the
+> temporal entropy prior, so each latent position can adaptively choose whether
+> to rely on DCVC-RT's original context or on explicit last-2 / last-8 / last-32
+> decoded-feature memory when coding the content latent.
 
-The target is lower entropy-coding bitrate for `y` while keeping the DCVC-RT
+The target is lower entropy-coding bitrate for `y` while preserving DCVC-RT's
 analysis transform, synthesis transform, quantization path, decoder, and
-bitstream structure synchronized with the official codec.
+bitstream structure.
 
-## Architecture
+## Invariants
+
+These constraints are no longer open for debate:
+
+| Invariant | Meaning |
+|---|---|
+| DCVC-RT backbone | DCVC-RT is the backbone. FLAVC remains only a stop-loss escape hatch. |
+| Frozen-codec semantics | Bulk codec parameters are not retrained. |
+| `y_hat` preservation | ACA changes only `(mu, sigma)` / entropy parameters, not `y_hat`. |
+| Encoder/decoder symmetry | `res_prior_param_decoder` behavior must remain consistent on compress and decompress paths. |
+| Online replay training | Frozen DCVC-RT forward produces ACA inputs online; do not dump full Vimeo tensors because that would be 8-16 TB. |
+| Gate init biased to DCVC-RT | The safe failure mode is "no improvement", not "regression". |
+| Exp 0a gate | DCVC-RT UVG inference reproduction is the Step 0 gate. |
+
+## Pivot 4 Locked Architecture
+
+The locked design is 4-way spatial routing per latent/context position at
+`H/8 x W/8`. There is no `alpha_null`: S0 already represents minimum useful
+context via DCVC-RT's original one-frame implicit state.
+
+| Mode | Scope | Implementation |
+|---|---|---|
+| S0 | DCVC-RT original 1-frame implicit context | Reuse `temporal_prior_encoder(ctx_t)`. |
+| S1 | K=2 sliding window | Cross-attention from `ctx_t` to DPB features `t-1..t-2`. |
+| S2 | K=8 sliding window | Same cross-attention path with K=8. |
+| S3 | K=32 full memory | K=32 cross-attention with RoPE over temporal-distance dimension and FlashAttention-2. |
+
+Fusion:
+
+```text
+C_adapt = sum_k alpha_k * C_k
+all C_k have shape (B, 256, H/8, W/8)
+```
+
+The only default injection point is:
+
+```text
+temporal_prior_encoder(ctx_t) → temporal_prior_encoder(C_adapt)
+```
+
+Expected new parameters: about 850K-1M.
+
+Implementation route:
+
+```text
+Option A: Minimal swap, default.
+Option B: Full refinement head, only if Option A cannot produce evidence.
+```
 
 ```text
 DCVC-RT backbone frozen
@@ -41,9 +99,19 @@ entropy coding y
 
 | ID | Contribution | Concrete claim |
 |---|---|---|
-| C1 | Adaptive Context Attention | Each latent token adaptively selects temporal context length instead of using one fixed history window. |
-| C2 | Multi-scope Temporal Memory Prior | DCVC-RT's short/implicit temporal context becomes a decoder-synchronized memory over last-2 / last-8 / last-32 frames. |
-| C3 | KV-Cached Efficient Context Modeling | Historical K/V tensors are computed once and cached, avoiding repeated long-context attention work for every frame. |
+| C1 | Per-latent-position temporal scope routing on a frozen LVC backbone | Method contribution. |
+| C2 | RD-complexity cost regularization | Add `beta * sum(alpha_k * c_k)` so the gate uses long context only when its rate benefit exceeds cost. |
+| C3 | KV-Cached Temporal Memory | Real KV cache across video frames: K/V projections are reused across frames, not recomputed. |
+
+## Technical Landmines
+
+| # | Risk | Required handling |
+|---:|---|---|
+| 1 | `q_dec` leak | `params_aca = cat([params_base[:, :128].detach(), params_aca_raw[:, 128:]], dim=1)`. `q_dec` always comes detached from baseline. |
+| 2 | `CUSTOMIZED_CUDA_INFERENCE` namespace pollution | Probe startup must patch `cuda_inference`, `layers`, `video_model`, and `image_model` namespaces to `False`; otherwise custom kernels break autograd. |
+| 3 | Mix-coefficient dead initialization | Use `C_adapt = C_rt + gamma * DeltaC`, `gamma_init = 0.01` not 0, and zero-init attention `out_proj`. |
+| 4 | High-LR training spike | Use warmup + cosine decay, held-out early stop, grad clip 0.5-1.0, and optional mixed precision only after fp32 sanity. |
+| 5 | Single-sequence overfit | Must use multi-sequence + multi-seed; seed variance above 5 percentage points means unstable. |
 
 ## Frozen-backbone Training Strategy
 

@@ -1,10 +1,10 @@
-# Level C: LLM-style ACA-RT
+# ACA-RT
 
-最终方案定为 **Level C：LLM-style ACA-RT**。
+Working name: **ACA-RT (Adaptive Context Aggregation for Real-Time Neural Video Compression)**.
+Backup name: **LCA-NVC** if the final real-time claim does not hold.
 
-> 在 frozen DCVC-RT 上，用 LLM-style 长上下文机制替换/增强原来的 temporal entropy
-> prior，让每个 latent token 自适应选择看最近 2 帧、8 帧还是 32 帧的历史 context，
-> 从而降低 content latent 的熵编码码率。
+> 保留 DCVC-RT 的 implicit 单状态传播，同时给 entropy model 提供对过去 K 帧 decoded
+> feature 的 explicit lossless access，让模型按位置自适应选择 temporal scope。
 
 - Level C 方案见 [`ACA_RT_LEVEL_C.md`](ACA_RT_LEVEL_C.md)
 - 当前机器 / env / 数据路径见 [`PLATFORM.md`](PLATFORM.md)
@@ -15,6 +15,16 @@
 ---
 
 ## Current Direction
+
+Project invariants:
+
+```text
+backbone: DCVC-RT frozen plug-in
+y_hat preservation: ACA only changes entropy params (mu, sigma), not y_hat
+symmetry: res_prior_param_decoder must match on compress/decompress
+training: online replay from frozen DCVC-RT, not full offline Vimeo dumps
+gate init: biased toward original DCVC-RT mode
+```
 
 ```text
 DCVC-RT backbone 冻结
@@ -44,9 +54,9 @@ entropy coding y
 
 | ID | Contribution |
 |---|---|
-| C1 | Adaptive Context Attention：每个 latent token 自适应选择 temporal context length |
-| C2 | Multi-scope Temporal Memory Prior：last-2 / last-8 / last-32 的长程 memory |
-| C3 | KV-Cached Efficient Context Modeling：历史帧 K/V 只计算一次并缓存 |
+| C1 | per-latent-position temporal scope routing on frozen LVC backbone |
+| C2 | RD-complexity cost regularization：`beta * sum(alpha_k * c_k)` |
+| C3 | KV-Cached Temporal Memory：跨 frame 复用 K/V 投影 |
 
 训练策略：不从头训练 DCVC-RT，不重训 encoder/decoder。先用 pretrained DCVC-RT dump
 `y_hat`、`z_hat`、original context、previous decoded features，只训练新增 ACA entropy
