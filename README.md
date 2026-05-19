@@ -86,6 +86,30 @@ Next:
 因此现在不直接进 Step 1，也不切 Pivot 3。下一轮 probe 必须覆盖多条 sequence，并同时比较
 identity、mean-pool K=8、naive attention K=8、stabilized attention K=8。
 
+Step 0b+ locked setup:
+
+```text
+train mix:
+    Bosphorus
+    HoneyBee
+    Beauty
+    ReadySteadyGo
+held-out:
+    ShakeNDry
+
+models:
+    M0 identity
+    M1 mean-pool K=8
+    M2 naive attention K=8
+    M3 stabilized attention K=8
+
+seeds: 42, 123, 7
+steps: 3000
+held-out eval: every 1000 steps
+loss: NLL-only on fixed y_hat / estimated bits
+hard fail: held-out ShakeNDry Δbpp > +5%
+```
+
 ---
 
 ## VCT V2 Background Status

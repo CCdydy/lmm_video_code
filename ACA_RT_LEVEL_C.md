@@ -173,16 +173,25 @@ train mix:
     Bosphorus
     HoneyBee
     Beauty
-    one high-motion sequence: Jockey / ReadySteadyGo / YachtRide
+    ReadySteadyGo
 
 held-out:
-    another completely unseen sequence
+    ShakeNDry
 ```
 
-The mix must cover static background, slow motion, camera pan, fast motion, low
-bpp sequences, and high bpp sequences. Otherwise the probe can learn a
-content-specific correction direction and still look good on same-sequence
-validation.
+This train/held-out split is intentionally content-diverse:
+
+| Sequence | Role | Coverage |
+|---|---|---|
+| Bosphorus | train | slow pan, static sea, high-bpp behavior |
+| HoneyBee | train | near-static content, micro vibration, low-bpp behavior |
+| Beauty | train | face, slow motion |
+| ReadySteadyGo | train | fast motion, camera shake, complex motion |
+| ShakeNDry | held-out | spray / high-frequency texture, true OOD relative to the train mix |
+
+Use ShakeNDry rather than YachtRide for holdout because YachtRide is too similar
+to Bosphorus; an overfit prior could appear to generalize there without really
+handling a different content type.
 
 Run four models side by side:
 
@@ -193,24 +202,48 @@ Run four models side by side:
 | M2 | naive attention K=8 | Current attention implementation, measured honestly. |
 | M3 | stabilized attention K=8 | Candidate mainline attention with residual-safe initialization. |
 
+Run all four models on the same train/eval split, seed pool, schedule, and NLL
+measurement. Only the memory module changes.
+
 Stabilized attention requirements:
 
 ```text
 C_adapt = C_rt + gamma * DeltaC
 
-gamma init: 0 or 0.01
+gamma init: 0.01
 attention out_proj: zero-init
-scope gate: initialized toward C_rt / identity
-normalization: LayerNorm or RMSNorm before qkv
-optimizer: smaller LR for qkv projections
-schedule: longer warmup
-training: gradient clipping
-reporting: 3 seeds, mean and std
+scope gate logits: RT slot bias +2, others 0
+    softmax init ≈ alpha_rt 0.88, others 0.04 each
+normalization: RMSNorm before qkv
+optimizer: qkv projection LR 1e-4, other new layers LR 1e-3
+schedule: 2k-step warmup, then cosine decay
+training: gradient clipping at 1.0
+reporting: seeds 42, 123, 7; report mean and std
 ```
 
 The identity path must be safe at initialization. ACA should not begin training
 by applying a large context rewrite such as a 0.79-strength correction to a
 low-bpp sequence whose original prior is already accurate.
+
+Two additional diagnostics are mandatory:
+
+1. **Variance-reduction baseline**: run stabilized M3 once with the attention
+   q/k/v path random-initialized but frozen. If frozen random attention also
+   performs well, the learned q/k/v representation is not the source of the gain;
+   the benefit is likely routing or residual mixing.
+2. **Gate-activity check**: each validation epoch logs `mean(alpha_rt)` and
+   `entropy(alpha)`. If stabilized M3 ends with `mean(alpha_rt) < 0.3`, treat it
+   as suspicious even if held-out bpp passes, because the model is still rewriting
+   the original context too aggressively.
+
+Operational decisions for the next run:
+
+| Item | Decision |
+|---|---|
+| Training steps | 3000 steps, i.e. 2x the 1500-step single-sequence probe. |
+| Held-out eval cadence | Run ShakeNDry validation every 1000 steps and at final. |
+| Seeds / hardware | Run 4 models × 3 seeds sequentially on the RTX 6000 Ada unless extra GPUs are explicitly available. |
+| Loss | NLL-only on fixed `y_hat` / estimated bits; no reconstruction loss. Scope cost is reserved for later gated runs after 0b+ passes basic generalization. |
 
 Pass criteria:
 
@@ -223,6 +256,7 @@ PASS:
     learned gate does not always choose strong context modification
 
 FAIL:
+    any model has held-out ShakeNDry delta > +5%
     held-out sequence remains > +10% worse
     or attention seed variance remains > 5 percentage points
 ```
@@ -236,8 +270,9 @@ Result A:
 
 Result B:
     mean-pool generalizes, attention remains unstable
-    → downgrade Level C mainline to pooled memory + lightweight gate
-      and keep attention as a later optional refinement
+    → Level C mainline becomes pooled memory base + lightweight gate.
+      Attention remains an optional refinement module, and the first paper
+      version does not depend on attention.
 
 Result C:
     both mean-pool and attention fail cross-sequence validation
